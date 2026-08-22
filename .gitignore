@@ -1,0 +1,6 @@
+# Platform credentials — never commit
+.env.inflow
+
+# Build output
+/google-oc-plugin
+/google-oc
