@@ -20,8 +20,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/FloMorphic/google-office-oc-plugin/internal/oc"
 	"github.com/Inflowenger/go-plugin-sdk/sdkv1"
-	"github.com/mehdi-shokohi/google-oc-plugin/internal/oc"
 )
 
 // Registry owns what the actions share: the OpenConnector client that turns each

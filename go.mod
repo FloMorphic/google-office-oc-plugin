@@ -1,4 +1,4 @@
-module github.com/mehdi-shokohi/google-oc-plugin
+module github.com/FloMorphic/google-office-oc-plugin
 
 go 1.26.2
 

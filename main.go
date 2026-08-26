@@ -22,8 +22,8 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/FloMorphic/google-office-oc-plugin/internal/actions"
 	"github.com/Inflowenger/go-plugin-sdk/sdkv1"
-	"github.com/mehdi-shokohi/google-oc-plugin/internal/actions"
 )
 
 const version = "v0.1.0"
