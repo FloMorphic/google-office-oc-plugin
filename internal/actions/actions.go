@@ -47,6 +47,7 @@ func New(send oc.Sender) *Registry { return &Registry{oc: oc.New(send)} }
 func (r *Registry) All() []sdkv1.Action {
 	var all []sdkv1.Action
 	all = append(all, r.sheetsActions()...)
+	all = append(all, r.docsActions()...)
 	return all
 }
 

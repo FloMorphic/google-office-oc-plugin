@@ -20,6 +20,7 @@ func (r *Registry) Metas() []sdkv1.Meta {
 		{Method: "google.meta.account.test", RequestHandler: r.metaAccountTest},
 		{Method: "googlesheets.meta.spreadsheets.list", RequestHandler: r.metaSpreadsheetsList},
 		{Method: "googlesheets.meta.sheets.list", RequestHandler: r.metaSheetsList},
+		{Method: "googledocs.meta.documents.list", RequestHandler: r.metaDocumentsList},
 	}
 }
 
@@ -75,9 +76,53 @@ func (r *Registry) metaSpreadsheetsList(req sdkv1.Request) any {
 func driveScopeHint(err error) string {
 	msg := strings.ToLower(err.Error())
 	if strings.Contains(msg, "403") || strings.Contains(msg, "permission") || strings.Contains(msg, "insufficient") || strings.Contains(msg, "scope") {
-		return " — this needs Google Drive read access; reconnect the account in FloMorphic → Connect with Drive scope, or paste the spreadsheet id directly."
+		return " — this needs Google Drive read access; reconnect the account in FloMorphic → Connect with Drive scope, or paste the file id directly."
 	}
 	return ""
+}
+
+// metaDocumentsList backs a "Load documents" button on a documentId field: it
+// lists the bound account's Google Docs files (via Drive) and REBUILDS the field
+// into a drop-down of them. Like the spreadsheets picker, the value written is
+// the file NAME (resolved back to an id at run time by ResolveDocumentID), and
+// the field stays typable so a pasted id / URL / {{$.path}} token still works
+// when the account lacks Drive scope.
+func (r *Registry) metaDocumentsList(req sdkv1.Request) any {
+	body := decodeMeta(req.Data)
+	target := text(body["targetField"])
+	if target == "" {
+		target = "documentId"
+	}
+
+	form, ok := docsFormByMethod[text(body["form"])]
+	if !ok {
+		return formkit.Failure("internal: no form to rebuild for this field").About(target).Patch(nil)
+	}
+
+	alias, connection := settingsFrom(body)
+	sess, err := r.oc.Bind(alias, connection)
+	if err != nil {
+		return formkit.Failure("%s", err.Error()).About(target).Patch(nil)
+	}
+	files, err := sess.Documents()
+	if err != nil {
+		return formkit.Failure("%s%s  [as account %s]", err.Error(), driveScopeHint(err), sess.Account.Name()).About(target).Patch(nil)
+	}
+	if len(files) == 0 {
+		return formkit.Warning("No documents found for account %s.", sess.Account.Name()).About(target).Patch(nil)
+	}
+
+	options := make([]formkit.Option, 0, len(files))
+	for _, f := range files {
+		options = append(options, formkit.Option{Value: f.Name, Label: f.Name})
+	}
+	return formkit.Choose(
+		form,
+		target,
+		options,
+		formkit.FormData(body),
+		formkit.Success("%d document(s) for %s — pick one:", len(files), sess.Account.Name()).About(target),
+	)
 }
 
 // metaSheetsList backs a "Load sheets" button on a sheetName / sheetId field: it

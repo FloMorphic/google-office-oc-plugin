@@ -144,3 +144,93 @@ var sheetsAggregateForm = formkit.New("Aggregate column").
 			Describe("Only for the percentage operation: the denominator to compute the column's share of."),
 	).
 	Build()
+
+// -------------------------------------------------------------- docs forms --
+
+// docPickHint is the shared tail for a "Document" field's description.
+const docPickHint = "Press ↻ Load documents to pick one, or type its exact name (an id, URL, or {{$.path}} token also works)."
+
+// documentIDField is the required "Document" input the Docs read/update actions
+// take. Like spreadsheetIDField it is NAME-first: a "Load documents" button lists
+// the account's Docs files (via Drive) and rebuilds this field into a drop-down
+// of their names; the plugin resolves the name back to an id at run time
+// (Session.ResolveDocumentID). ownerMethod is the action whose form the picker
+// rebuilds. The field stays typable, so a name outside the list — or a pasted
+// id / URL / {{$.path}} token — still resolves.
+func documentIDField(describe, ownerMethod string) *formkit.Field {
+	return formkit.Text("documentId", "Document").
+		Required().
+		Describe(describe).
+		Lookup("googledocs.meta.documents.list", "Load documents").
+		Picks(ownerMethod)
+}
+
+var docsCreateForm = formkit.New("Create document").
+	Add(
+		formkit.Text("title", "Title").
+			Required().
+			Describe("Name for the new document. Accepts {{$.path}} tokens."),
+		formkit.TextArea("text", "Initial text").
+			Describe("Optional text to insert at the beginning of the new document. Accepts {{$.path}} tokens."),
+		formkit.Bool("reuseByName", "Reuse existing document with this title").
+			Default(false).
+			Describe("Before creating, look up this exact title in Drive; if a document already exists, return it instead of creating a duplicate. Off always creates a new file. (Needs Drive read scope; title match is case-sensitive.)"),
+	).
+	Build()
+
+var docsGetTextForm = formkit.New("Get document text").
+	Add(
+		documentIDField("The document to read, by name. "+docPickHint, "googledocs.get_document_plaintext"),
+		formkit.Bool("includeTables", "Include tables").
+			Default(true).
+			Describe("Include table content in the plain-text output."),
+		formkit.Bool("includeHeaders", "Include headers").
+			Default(false).
+			Describe("Include header content in the plain-text output."),
+		formkit.Bool("includeFooters", "Include footers").
+			Default(false).
+			Describe("Include footer content in the plain-text output."),
+		formkit.Bool("includeFootnotes", "Include footnotes").
+			Default(false).
+			Describe("Include footnote content in the plain-text output."),
+		formkit.Bool("includeTabsContent", "Include all tabs").
+			Default(false).
+			Describe("Include content from all tabs in the plain-text output."),
+	).
+	Build()
+
+var docsInsertTextForm = formkit.New("Insert text").
+	Add(
+		documentIDField("The document to insert text into, by name. "+docPickHint, "googledocs.insert_text_action"),
+		formkit.TextArea("text", "Text").
+			Required().
+			Describe("The text to insert. Accepts {{$.path}} tokens."),
+		formkit.Bool("appendToEnd", "Append to end").
+			Default(true).
+			Describe("Insert the text at the end of the document. Turn off to insert at a specific index instead."),
+		formkit.Integer("insertionIndex", "Insertion index").
+			Min(0).
+			Describe("Used only when Append to end is off: the zero-based index to insert at. The position must be inside an existing paragraph."),
+		formkit.Text("segmentId", "Segment id").
+			Describe("Optional. The header, footer, or footnote segment to insert into. Empty targets the document body."),
+	).
+	Build()
+
+var docsCopyForm = formkit.New("Copy document").
+	Add(
+		documentIDField("The document to copy, by name. "+docPickHint, "googledocs.copy_document"),
+		formkit.Text("title", "New title").
+			Describe("Title for the copy. Accepts {{$.path}} tokens. Leave empty to let Google name it."),
+		formkit.Bool("includeSharedDrives", "Search shared drives").
+			Default(false).
+			Describe("Also look in shared drives when locating the source document."),
+	).
+	Build()
+
+var docsExportPDFForm = formkit.New("Export as PDF").
+	Add(
+		documentIDField("The document to export, by name. "+docPickHint, "googledocs.export_document_as_pdf"),
+		formkit.Text("filename", "Filename").
+			Describe("Filename for the exported PDF. Accepts {{$.path}} tokens. Leave empty to use the document title."),
+	).
+	Build()
