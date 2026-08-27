@@ -2,29 +2,144 @@ package actions
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
+	"github.com/FloMorphic/google-office-oc-plugin/internal/oc"
 	"github.com/Inflowenger/go-plugin-sdk/formkit"
 	"github.com/Inflowenger/go-plugin-sdk/sdkv1"
 )
 
-// Metas are the settings + form meta RPCs, served outside the job lifecycle so a
-// dialog can call them while it is open:
-//   - list/test the connected Google account (shared by every node);
-//   - list the live action catalog for each service (rebuilds that node's
-//     "action" field into a drop-down).
+// Metas are the meta RPCs served outside the job lifecycle so a dialog can call
+// them while it is open:
+//   - list/test the connected Google account (settings form);
+//   - resolve the dependent id fields an action form cannot ask a user to type:
+//     a spreadsheet's sheets (tabs) and a check that a spreadsheet id resolves.
 func (r *Registry) Metas() []sdkv1.Meta {
-	metas := []sdkv1.Meta{
+	return []sdkv1.Meta{
 		{Method: "google.meta.account.list", RequestHandler: r.metaAccountList},
 		{Method: "google.meta.account.test", RequestHandler: r.metaAccountTest},
+		{Method: "googlesheets.meta.spreadsheets.list", RequestHandler: r.metaSpreadsheetsList},
+		{Method: "googlesheets.meta.sheets.list", RequestHandler: r.metaSheetsList},
 	}
-	for _, s := range services {
-		metas = append(metas, sdkv1.Meta{
-			Method:         s.id + ".meta.actions",
-			RequestHandler: r.metaActions(s),
-		})
+}
+
+// metaSpreadsheetsList backs a "Load spreadsheets" button on a spreadsheetId
+// field: it lists the bound account's Google Sheets files (via Drive) and
+// REBUILDS the field into a drop-down of them (value = file id, label = name).
+// The field stays typable, so a pasted id or a {{$.path}} token still works when
+// the account lacks Drive scope (the button then reports the gateway's error).
+func (r *Registry) metaSpreadsheetsList(req sdkv1.Request) any {
+	body := decodeMeta(req.Data)
+	target := text(body["targetField"])
+	if target == "" {
+		target = "spreadsheetId"
 	}
-	return metas
+
+	form, ok := sheetsFormByMethod[text(body["form"])]
+	if !ok {
+		return formkit.Failure("internal: no form to rebuild for this field").About(target).Patch(nil)
+	}
+
+	alias, connection := settingsFrom(body)
+	sess, err := r.oc.Bind(alias, connection)
+	if err != nil {
+		return formkit.Failure("%s", err.Error()).About(target).Patch(nil)
+	}
+	files, err := sess.Spreadsheets()
+	if err != nil {
+		return formkit.Failure("%s%s  [as account %s]", err.Error(), driveScopeHint(err), sess.Account.Name()).About(target).Patch(nil)
+	}
+	if len(files) == 0 {
+		return formkit.Warning("No spreadsheets found for account %s.", sess.Account.Name()).About(target).Patch(nil)
+	}
+
+	options := make([]formkit.Option, 0, len(files))
+	for _, f := range files {
+		options = append(options, formkit.Option{Value: f.ID, Label: f.Name})
+	}
+	return formkit.Choose(
+		form,
+		target,
+		options,
+		formkit.FormData(body),
+		formkit.Success("%d spreadsheet(s) for %s — pick one:", len(files), sess.Account.Name()).About(target),
+	)
+}
+
+// driveScopeHint nudges toward the usual cause when the Drive list is refused:
+// the connected account was not granted Drive scope.
+func driveScopeHint(err error) string {
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "403") || strings.Contains(msg, "permission") || strings.Contains(msg, "insufficient") || strings.Contains(msg, "scope") {
+		return " — this needs Google Drive read access; reconnect the account in FloMorphic → Connect with Drive scope, or paste the spreadsheet id directly."
+	}
+	return ""
+}
+
+// metaSheetsList backs a "Load sheets" button on a sheetName / sheetId field: it
+// reads the spreadsheetId the user already entered, lists that spreadsheet's tabs
+// as the bound account, and REBUILDS the target field into a drop-down of them.
+// The value written is the tab title (for sheetName fields) or the numeric
+// sheetId (for sheetId fields); the label shows both.
+func (r *Registry) metaSheetsList(req sdkv1.Request) any {
+	body := decodeMeta(req.Data)
+	target := text(body["targetField"])
+	if target == "" {
+		target = "sheetName"
+	}
+
+	form, ok := sheetsFormByMethod[text(body["form"])]
+	if !ok {
+		return formkit.Failure("internal: no form to rebuild for this field").About(target).Patch(nil)
+	}
+
+	spreadsheetID := text(pick(body, "spreadsheetId"))
+	if spreadsheetID == "" {
+		return formkit.Warning("Enter the Spreadsheet id first, then press Load sheets.").About(target).Patch(nil)
+	}
+
+	alias, connection := settingsFrom(body)
+	sess, err := r.oc.Bind(alias, connection)
+	if err != nil {
+		return formkit.Failure("%s", err.Error()).About(target).Patch(nil)
+	}
+	id := oc.SpreadsheetID(spreadsheetID)
+	tabs, err := sess.Sheets(id, false)
+	if err != nil {
+		return formkit.Failure("%s%s  [tried id %q as account %s]", err.Error(), notFoundHint(err), id, sess.Account.Name()).About(target).Patch(nil)
+	}
+	if len(tabs) == 0 {
+		return formkit.Warning("No sheets found in that spreadsheet.").About(target).Patch(nil)
+	}
+
+	wantID := target == "sheetId"
+	options := make([]formkit.Option, 0, len(tabs))
+	for _, t := range tabs {
+		value := t.Title
+		if wantID {
+			value = strconv.Itoa(t.ID)
+		}
+		options = append(options, formkit.Option{Value: value, Label: fmt.Sprintf("%s  (id %d)", t.Title, t.ID)})
+	}
+	return formkit.Choose(
+		form,
+		target,
+		options,
+		formkit.FormData(body),
+		formkit.Success("%d sheet(s) — pick one:", len(tabs)).About(target),
+	)
+}
+
+// notFoundHint appends actionable guidance when the gateway reports the
+// spreadsheet was not found — nearly always a wrong id (a pasted URL is handled
+// automatically) or the connected account not having access to it.
+func notFoundHint(err error) string {
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "not_found") || strings.Contains(msg, "not found") || strings.Contains(msg, "404") {
+		return " — check the Spreadsheet id is correct and that the connected Google account can open this spreadsheet (it must be the owner or shared with it)."
+	}
+	return ""
 }
 
 // metaAccountList backs the settings form's "Load accounts" button: it asks the
@@ -84,44 +199,6 @@ func (r *Registry) metaAccountTest(req sdkv1.Request) any {
 		suffix = " — default"
 	}
 	return formkit.Success("Resolved %s (alias %s)%s.", acc.Name(), acc.Alias, suffix).Patch(nil)
-}
-
-// metaActions backs a run node's "Load actions" button: it fetches the live
-// action catalog for the service and REBUILDS the "action" field into a drop-down
-// (value = action name, label = name + operation type). The catalog comes from
-// the gateway, so the picker never drifts from what the backend can actually run.
-func (r *Registry) metaActions(s service) func(sdkv1.Request) any {
-	return func(req sdkv1.Request) any {
-		body := decodeMeta(req.Data)
-		connection := text(pick(body, "connection"))
-
-		list, err := r.oc.ListActions(s.id, connection)
-		if err != nil {
-			return formkit.Failure("%s", err.Error()).About("action").Patch(nil)
-		}
-		if len(list) == 0 {
-			return formkit.
-				Warning("No %s actions returned by the gateway.", s.id).
-				About("action").
-				Patch(nil)
-		}
-
-		options := make([]formkit.Option, 0, len(list))
-		for _, a := range list {
-			label := a.Name
-			if a.OperationType != "" {
-				label += "  (" + a.OperationType + ")"
-			}
-			options = append(options, formkit.Option{Value: a.Name, Label: label})
-		}
-		return formkit.Choose(
-			r.forms[s.id],
-			"action",
-			options,
-			formkit.FormData(body),
-			formkit.Success("%d %s action(s) — pick one:", len(list), s.id).About("action"),
-		)
-	}
 }
 
 // Settings declares the profile: the form plus the submit handler that validates
@@ -194,4 +271,15 @@ func pick(body map[string]any, key string) any {
 func text(v any) string {
 	s, _ := v.(string)
 	return strings.TrimSpace(s)
+}
+
+// settingsFrom reads the bound profile a meta call carries under "settings" —
+// the account the picker must resolve as. Empty when the call has no bound
+// profile (e.g. the set-up dialog), which the pickers report as "no account".
+func settingsFrom(body map[string]any) (alias, connection string) {
+	nested, ok := body["settings"].(map[string]any)
+	if !ok {
+		return "", ""
+	}
+	return text(nested["alias"]), text(nested["connection"])
 }

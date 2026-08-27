@@ -3,7 +3,7 @@ module github.com/FloMorphic/google-office-oc-plugin
 go 1.26.2
 
 require (
-	github.com/Inflowenger/go-plugin-sdk v0.2.0
+	github.com/Inflowenger/go-plugin-sdk v0.2.1
 	github.com/bytedance/sonic v1.15.2
 	github.com/nats-io/nats.go v1.52.0
 )

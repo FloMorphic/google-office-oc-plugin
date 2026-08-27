@@ -1,17 +1,16 @@
-// Package actions wires the OpenConnector bridge onto the plugin's node actions.
+// Package actions wires the OpenConnector bridge onto the plugin's node actions:
+// one Action per concrete Google operation, plus the meta RPCs the settings form
+// uses to list and test the connected Google accounts.
 //
 // This plugin is a pure request builder: it holds no Google token and makes no
-// Google API calls. It exposes ONE node per Google service (Sheets, Drive,
-// Calendar, Docs) — a generic "run action" node. Each node picks an
-// OpenConnector action by name (populated live from the gateway) and forwards a
-// JSON input payload to be run as the chosen connected account; the backend
-// holds the credential (see ../oc).
+// Google API calls. Each action builds a typed input payload and asks the
+// FloMorphic backend to run the matching OpenConnector action as the chosen
+// connected account; the backend holds the credential (see ../oc).
 //
-// Why generic rather than one node per operation: the four services expose well
-// over a hundred actions between them, the SDK cannot populate a form's options
-// at runtime for every one, and the catalog moves. A generic runner stays in
-// sync with the gateway and keeps the codebase small; the action picker is filled
-// live via a meta (see meta.go).
+// One binary hosts several Google products (Sheets, Docs, Calendar, Drive). Each
+// action is tagged with Tags["class"] = its service, so the frontend bundles and
+// isolates each product's ports together. Operations are added one at a time in
+// the per-service files (sheets.go, …).
 package actions
 
 import (
@@ -24,49 +23,31 @@ import (
 	"github.com/Inflowenger/go-plugin-sdk/sdkv1"
 )
 
+// class labels group an action under its Google product on the canvas via
+// Tags["class"]; the frontend renders each class as its own bundle of ports.
+const (
+	classSheets   = "sheets"
+	classDocs     = "docs"
+	classCalendar = "calendar"
+	classDrive    = "drive"
+)
+
 // Registry owns what the actions share: the OpenConnector client that turns each
-// call's bound settings profile into a session, and the per-service forms the
-// action pickers rebuild. The plugin holds no Google configuration of its own.
+// call's bound settings profile into a session. The plugin holds no Google
+// configuration of its own.
 type Registry struct {
-	oc    *oc.Client
-	forms map[string]sdkv1.FormBuilder // service id -> its run form
+	oc *oc.Client
 }
 
 // New builds the registry over a NATS sender (the plugin's Send).
-func New(send oc.Sender) *Registry {
-	r := &Registry{oc: oc.New(send), forms: make(map[string]sdkv1.FormBuilder)}
-	for _, s := range services {
-		r.forms[s.id] = runForm(s)
-	}
-	return r
-}
+func New(send oc.Sender) *Registry { return &Registry{oc: oc.New(send)} }
 
-// service describes one Google service this plugin fronts as a node.
-type service struct {
-	id    string // OpenConnector service id, e.g. "googlesheets"
-	title string // node title on the canvas
-	icon  string // mdi icon
-	desc  string // node description
-	class string // Action.Tags["class"]: the sub-product ports group under
-}
-
-// services is the fixed set of Google services this plugin exposes, in canvas
-// order. Adding a Google service is a one-line change here — the runner, the
-// form, and the action picker are all generic.
-var services = []service{
-	{id: "googlesheets", title: "Google Sheets (OpenConnector)", icon: "mdi-google-spreadsheet", desc: "Run any Google Sheets action as a connected Google account (via OpenConnector).", class: "sheets"},
-	{id: "googledrive", title: "Google Drive (OpenConnector)", icon: "mdi-google-drive", desc: "Run any Google Drive action as a connected Google account (via OpenConnector).", class: "drive"},
-	{id: "googlecalendar", title: "Google Calendar (OpenConnector)", icon: "mdi-calendar", desc: "Run any Google Calendar action as a connected Google account (via OpenConnector).", class: "calendar"},
-	{id: "googledocs", title: "Google Docs (OpenConnector)", icon: "mdi-file-document", desc: "Run any Google Docs action as a connected Google account (via OpenConnector).", class: "docs"},
-}
-
-// All returns every action this plugin exposes, in the order the canvas shows them.
+// All returns every action this plugin exposes, in the order the canvas shows
+// them — grouped by service so a class's ports sit together.
 func (r *Registry) All() []sdkv1.Action {
-	out := make([]sdkv1.Action, 0, len(services))
-	for _, s := range services {
-		out = append(out, r.runAction(s))
-	}
-	return out
+	var all []sdkv1.Action
+	all = append(all, r.sheetsActions()...)
+	return all
 }
 
 // settingsEnvelope is the platform-managed half of every request body. The
@@ -81,96 +62,53 @@ type settingsEnvelope struct {
 	} `json:"settings"`
 }
 
-// runInput is the body of a run node: which OpenConnector action to invoke, and
-// the JSON input to pass to it.
-type runInput struct {
-	Action string `json:"action"`
-	Input  string `json:"input"`
-}
+// handler is what each action implements: pure work over a ready session (the
+// OpenConnector handle bound to the chosen account), with finishing the job left
+// to run. Returning an error fails the node.
+type handler[T any] func(job *sdkv1.Job, sess *oc.Session, in T) (map[string]any, error)
 
-// runAction builds the generic "run action" node for one service.
-func (r *Registry) runAction(s service) sdkv1.Action {
-	return sdkv1.Action{
-		Method:      s.id + ".run",
-		Title:       s.title,
-		Description: s.desc,
-		Icon:        sdkv1.Icon{Icon: s.icon},
-		Tags:        map[string]string{"class": s.class},
-		Form:        r.forms[s.id],
-		RequestHandler: func(job sdkv1.Job) {
-			req, err := sdkv1.CastRequestTo[runInput](job.Req.Data)
-			if err != nil {
-				job.DoneWithError("invalid request body: " + err.Error())
-				return
-			}
-			alias, connection := decodeSettings(job.Req.Data)
+// run adapts a handler into an SDK job handler: decode the typed body and the
+// settings profile that came with it, bind the account, resolve {{$...}} tokens,
+// report progress, and terminate the job exactly once on every path — success,
+// bad input, a missing/unresolved account, or a failed gateway call. The plugin
+// builds and vets the request; FloMorphic only proxies it.
+func run[T any](r *Registry, title string, fn handler[T]) sdkv1.JobHandler {
+	return func(job sdkv1.Job) {
+		req, err := sdkv1.CastRequestTo[T](job.Req.Data)
+		if err != nil {
+			job.DoneWithError("invalid request body: " + err.Error())
+			return
+		}
+		alias, connection := decodeSettings(job.Req.Data)
 
-			action := strings.TrimSpace(req.Body.Action)
-			if action == "" {
-				job.DoneWithError("missing required input: action — press Load actions and pick one")
-				return
-			}
+		sess, err := r.oc.Bind(alias, connection)
+		if err != nil {
+			job.DoneWithError(err.Error())
+			return
+		}
 
-			bot, err := r.oc.Bind(alias, connection)
-			if err != nil {
-				job.DoneWithError(err.Error())
-				return
-			}
+		// Resolve {{$...}} tokens in every string input against the flow scope.
+		resolveInputVars(&job, &req.Body)
 
-			input, err := parseInput(req.Body.Input)
-			if err != nil {
-				job.DoneWithError(err.Error())
-				return
-			}
-			// Resolve {{$...}} tokens in every string leaf of the input against
-			// the flow scope, so any field can reference upstream data.
-			input = resolveInputVars(&job, input)
+		job.Progress(20, sdkv1.Frame{Title: title, Content: "as " + sess.Account.Name()})
 
-			fq := qualify(s.id, action)
-			job.Progress(20, sdkv1.Frame{Title: s.title, Content: fq + " as " + bot.Account.Name()})
+		out, err := fn(&job, sess, req.Body)
+		if err != nil {
+			job.DoneWithError(err.Error())
+			return
+		}
+		if out == nil {
+			out = map[string]any{}
+		}
 
-			raw, err := bot.Do(fq, input)
-			if err != nil {
-				job.DoneWithError(err.Error())
-				return
-			}
-
-			job.Progress(90, sdkv1.Frame{Title: s.title, Content: "done"})
-			job.Done(object(raw))
-		},
+		job.Progress(90, sdkv1.Frame{Title: title, Content: "done"})
+		job.Done(out)
 	}
-}
-
-// qualify turns a picked action name into the fully-qualified id the gateway
-// wants, tolerating a value the user typed with or without the service prefix.
-func qualify(serviceID, action string) string {
-	if strings.HasPrefix(action, serviceID+".") {
-		return action
-	}
-	return serviceID + "." + action
-}
-
-// parseInput decodes the JSON object the user supplied as the action's input.
-// Blank means "no input". A non-object (array, scalar) is rejected — every
-// gateway action takes a named-field object.
-func parseInput(raw string) (map[string]any, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return map[string]any{}, nil
-	}
-	var in map[string]any
-	if err := json.Unmarshal([]byte(raw), &in); err != nil {
-		return nil, fmt.Errorf("input is not a valid JSON object: %v", err)
-	}
-	if in == nil {
-		return map[string]any{}, nil
-	}
-	return in, nil
 }
 
 // decodeSettings pulls the bound profile's alias/connection out of the request
 // body, reading the same bytes the action input came from so the settings
-// envelope stays out of the action's input struct.
+// envelope stays out of every action's input struct.
 func decodeSettings(data []byte) (alias, connection string) {
 	env, err := sdkv1.CastRequestTo[settingsEnvelope](data)
 	if err != nil || env == nil {
@@ -200,6 +138,25 @@ func object(raw json.RawMessage) map[string]any {
 }
 
 // ---------------------------------------------------------------- helpers --
+
+type namedValue struct{ name, value string }
+
+func nv(name, value string) namedValue { return namedValue{name: name, value: value} }
+
+// requireAll reports the required inputs left blank, so an action fails with a
+// clear message instead of a raw gateway 400.
+func requireAll(values ...namedValue) error {
+	var missing []string
+	for _, v := range values {
+		if strings.TrimSpace(v.value) == "" {
+			missing = append(missing, v.name)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("missing required input: %s", strings.Join(missing, ", "))
+	}
+	return nil
+}
 
 // decodeMeta reads a meta RPC's arguments. Meta calls come from the form
 // renderer rather than the job pipeline, so the payload may or may not be

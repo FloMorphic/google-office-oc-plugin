@@ -2,6 +2,7 @@ package actions
 
 import (
 	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 
@@ -12,10 +13,10 @@ import (
 // {{ $.a.b }} — capture the JSON path inside the mustaches.
 var varRe = regexp.MustCompile(`\{\{\s*(\$[^}]+?)\s*\}\}`)
 
-// varResolver rewrites {{$...}} tokens in string values against the flow scope,
-// so any input field can reference upstream data. It holds a per-call cache so
-// each distinct path is fetched from the runtime only once, however many values
-// reference it.
+// varResolver rewrites {{$...}} tokens in free-text inputs against the flow
+// scope, so any string field can reference upstream data the same way. It holds
+// a per-call cache so each distinct path is fetched from the runtime only once,
+// however many fields reference it.
 type varResolver struct {
 	job   *sdkv1.Job
 	cache map[string]string
@@ -57,34 +58,33 @@ func (vr *varResolver) fetch(jsonPath string) string {
 	return string(raw)
 }
 
-// resolveInputVars walks the decoded input and rewrites {{$...}} tokens in every
-// string leaf, descending into nested objects and arrays. Non-string leaves are
-// left untouched. Values with no token never hit the runtime, so this is safe to
-// run over every action's input uniformly.
-func resolveInputVars(job *sdkv1.Job, in map[string]any) map[string]any {
-	vr := newVarResolver(job)
-	walked, _ := walkResolve(vr, in).(map[string]any)
-	if walked == nil {
-		return in
+// resolveInputVars walks the decoded action input and rewrites {{$...}} tokens
+// in every string and []string field. Plain fields (no token) never hit the
+// runtime, so this is safe to run over every action's input uniformly.
+func resolveInputVars(job *sdkv1.Job, in any) {
+	v := reflect.ValueOf(in)
+	if v.Kind() != reflect.Pointer || v.IsNil() {
+		return
 	}
-	return walked
-}
+	v = v.Elem()
+	if v.Kind() != reflect.Struct {
+		return
+	}
 
-func walkResolve(vr *varResolver, v any) any {
-	switch t := v.(type) {
-	case string:
-		return vr.resolve(t)
-	case map[string]any:
-		for k, val := range t {
-			t[k] = walkResolve(vr, val)
+	vr := newVarResolver(job)
+	for i := 0; i < v.NumField(); i++ {
+		f := v.Field(i)
+		if !f.CanSet() {
+			continue
 		}
-		return t
-	case []any:
-		for i, val := range t {
-			t[i] = walkResolve(vr, val)
+		switch {
+		case f.Kind() == reflect.String:
+			f.SetString(vr.resolve(f.String()))
+		case f.Kind() == reflect.Slice && f.Type().Elem().Kind() == reflect.String:
+			for j := 0; j < f.Len(); j++ {
+				el := f.Index(j)
+				el.SetString(vr.resolve(el.String()))
+			}
 		}
-		return t
-	default:
-		return v
 	}
 }

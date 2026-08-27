@@ -1,14 +1,15 @@
 // Command google-oc is a FloMorphic plugin node for Google Workspace, over
 // OpenConnector.
 //
-// It exposes one node per Google service — Sheets, Drive, Calendar, Docs — but
-// holds NO Google token and makes NO Google API calls. A Google account is
-// connected once, centrally, in FloMorphic → Connect (via OpenConnector / oomol),
-// where OAuth grants the Workspace scopes. Each node is a generic request
-// builder: its settings dialog picks which connected account to act as (by
-// alias), it lists that service's actions live from the gateway, and every run
-// asks the FloMorphic backend, over NATS, to execute the chosen OpenConnector
-// action as that account. The backend holds the credential.
+// It exposes one node per concrete Google operation — grouped by product with
+// Tags["class"] (Sheets, Drive, Calendar, Docs) so the frontend bundles each
+// product's ports together — but holds NO Google token and makes NO Google API
+// calls. A Google account is connected once, centrally, in FloMorphic → Connect
+// (via OpenConnector / oomol), where OAuth grants the Workspace scopes. Each node
+// is a typed request builder: its settings dialog picks which connected account
+// to act as (by alias), its form collects that operation's own inputs, and every
+// run asks the FloMorphic backend, over NATS, to execute the matching
+// OpenConnector action as that account. The backend holds the credential.
 //
 // Because it reaches FloMorphic's central services (the `flomorphic.svc.oc.*`
 // subjects), this plugin must run with an OPEN (multi) runtime credential — a
@@ -47,7 +48,7 @@ func main() {
 		log.Fatalf("google-oc: cannot connect to infra (%s): %v", envFile, err)
 	}
 
-	// The registry sends its account/action/catalog requests over the plugin's
+	// The registry sends its account and action requests over the plugin's
 	// NATS connection (Plugin.Send: request/reply with retry).
 	registry := actions.New(plugin.Send)
 
@@ -71,7 +72,7 @@ func main() {
 	for _, action := range all {
 		methods = append(methods, action.Method)
 	}
-	log.Printf("google-oc plugin %s ready with %d nodes: %s", version, len(all), strings.Join(methods, ", "))
+	log.Printf("google-oc plugin %s ready with %d actions: %s", version, len(all), strings.Join(methods, ", "))
 	log.Printf("google-oc: these nodes act as a Google account connected in FloMorphic → Connect")
 
 	// Start() only wires up subscriptions; the process has to stay alive to
