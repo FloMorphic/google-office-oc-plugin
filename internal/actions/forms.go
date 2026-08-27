@@ -50,14 +50,16 @@ var settingsForm sdkv1.FormBuilder = formkit.New("Google account (OpenConnector)
 // descriptions stay consistent.
 const a1Hint = `A1 notation, e.g. "Sheet1!A1:D50". A sheet name with a space or symbol must be quoted: "'My Sheet'!A1:B2".`
 
-// spreadsheetIDField is the required "Spreadsheet id" input every Sheets action
-// takes. It carries a "Load spreadsheets" button that lists the account's Sheets
-// files (via Drive) and rebuilds this field into a drop-down of them — so a user
-// picks a spreadsheet instead of hunting its id in a URL. ownerMethod is the
-// action whose form the picker rebuilds (Field.Picks). The value stays typable:
-// the field also accepts a pasted id or a {{$.path}} token.
+// spreadsheetIDField is the required "Spreadsheet" input every Sheets action
+// takes. It is NAME-first: a "Load spreadsheets" button lists the account's
+// Sheets files (via Drive) and rebuilds this field into a drop-down of their
+// names, so the user never handles an id. The stored value is the file name; the
+// plugin resolves it back to an id at run time (Session.ResolveSpreadsheetID).
+// ownerMethod is the action whose form the picker rebuilds (Field.Picks). The
+// field stays typable, so a name outside the list — or a pasted id / URL /
+// {{$.path}} token — still resolves.
 func spreadsheetIDField(describe, ownerMethod string) *formkit.Field {
-	return formkit.Text("spreadsheetId", "Spreadsheet id").
+	return formkit.Text("spreadsheetId", "Spreadsheet").
 		Required().
 		Describe(describe).
 		Lookup("googlesheets.meta.spreadsheets.list", "Load spreadsheets").
@@ -76,7 +78,7 @@ var sheetsCreateForm = formkit.New("Create spreadsheet").
 
 var sheetsAddSheetForm = formkit.New("Add sheet").
 	Add(
-		spreadsheetIDField("The spreadsheet to add a sheet to. Press ↻ Load spreadsheets to pick one, or paste its id / a {{$.path}} token.", "googlesheets.add_sheet"),
+		spreadsheetIDField("The spreadsheet to add a sheet to, by name. Press ↻ Load spreadsheets to pick one, or type its exact name (an id, URL, or {{$.path}} token also works).", "googlesheets.add_sheet"),
 		formkit.Text("title", "Sheet title").
 			Required().
 			Describe("Title for the new sheet (tab). Accepts {{$.path}} tokens."),
@@ -88,7 +90,7 @@ var sheetsAddSheetForm = formkit.New("Add sheet").
 
 var sheetsGetValuesForm = formkit.New("Get values").
 	Add(
-		spreadsheetIDField("The spreadsheet to read. Press ↻ Load spreadsheets to pick one, or paste its id / a {{$.path}} token.", "googlesheets.get_values"),
+		spreadsheetIDField("The spreadsheet to read, by name. Press ↻ Load spreadsheets to pick one, or type its exact name (an id, URL, or {{$.path}} token also works).", "googlesheets.get_values"),
 		formkit.List("ranges", "Ranges").
 			Required().
 			Describe("One or more ranges to read. "+a1Hint),
@@ -106,7 +108,7 @@ var sheetsGetValuesForm = formkit.New("Get values").
 
 var sheetsClearValuesForm = formkit.New("Clear values").
 	Add(
-		spreadsheetIDField("The spreadsheet to clear from. Press ↻ Load spreadsheets to pick one, or paste its id / a {{$.path}} token.", "googlesheets.clear_values"),
+		spreadsheetIDField("The spreadsheet to clear from, by name. Press ↻ Load spreadsheets to pick one, or type its exact name (an id, URL, or {{$.path}} token also works).", "googlesheets.clear_values"),
 		formkit.Text("range", "Range").
 			Required().
 			Describe("The range to clear. Only cell values are removed; formatting is kept. "+a1Hint),
@@ -115,10 +117,10 @@ var sheetsClearValuesForm = formkit.New("Clear values").
 
 var sheetsAggregateForm = formkit.New("Aggregate column").
 	Add(
-		spreadsheetIDField("The spreadsheet to read. Press ↻ Load spreadsheets to pick one, or paste its id / a {{$.path}} token.", "googlesheets.aggregate_column_data"),
+		spreadsheetIDField("The spreadsheet to read, by name. Press ↻ Load spreadsheets to pick one, or type its exact name (an id, URL, or {{$.path}} token also works).", "googlesheets.aggregate_column_data"),
 		formkit.Text("sheetName", "Sheet name").
 			Required().
-			Describe("The sheet (tab) to aggregate over. Fill Spreadsheet id first, then press ↻ Load sheets to pick from its tabs.").
+			Describe("The sheet (tab) to aggregate over. Choose the Spreadsheet first, then press ↻ Load sheets to pick from its tabs.").
 			Lookup("googlesheets.meta.sheets.list", "Load sheets").
 			Picks("googlesheets.aggregate_column_data"),
 		formkit.Text("targetColumn", "Target column").

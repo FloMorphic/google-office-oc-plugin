@@ -352,13 +352,18 @@ func (s *Session) Spreadsheets() ([]DriveFile, error) {
 // a 400 (or, worse, injects extra clauses).
 var driveNameQuoteRe = strings.NewReplacer(`\`, `\\`, `'`, `\'`)
 
-// FindSpreadsheetByName returns the account's newest non-trashed Sheets file
-// whose title is exactly name, or (nil, nil) when none exists. It powers the
-// create action's "reuse existing" option: the Sheets create API always makes a
-// new file (Drive allows duplicate names), so the dedupe is a Drive name lookup.
-// name is matched verbatim (case-sensitive, as Drive stores it) and quote-escaped
-// for the `q` literal. Like Spreadsheets, it needs Drive read scope.
-func (s *Session) FindSpreadsheetByName(name string) (*DriveFile, error) {
+// looksLikeID matches a bare spreadsheet id: 40+ URL-safe base64 chars, which no
+// human-typed spreadsheet NAME realistically is. A reference that looks like an
+// id skips the Drive name lookup, so a pasted id or an upstream
+// {{$.spreadsheetId}} token still resolves for an account that has only Sheets
+// scope (no Drive read access).
+var looksLikeID = regexp.MustCompile(`^[A-Za-z0-9_-]{40,}$`)
+
+// spreadsheetsNamed lists the account's non-trashed Sheets files whose title is
+// exactly name — case-sensitive, as Drive stores it — newest first. An empty
+// name yields nil. name is quote-escaped for the `q` literal. Needs Drive read
+// scope, or the gateway answers 403.
+func (s *Session) spreadsheetsNamed(name string) ([]DriveFile, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, nil
@@ -366,7 +371,7 @@ func (s *Session) FindSpreadsheetByName(name string) (*DriveFile, error) {
 	input := map[string]any{
 		"q":        fmt.Sprintf("name = '%s' and mimeType='%s' and trashed=false", driveNameQuoteRe.Replace(name), mimeSpreadsheet),
 		"orderBy":  "modifiedTime desc",
-		"pageSize": 1,
+		"pageSize": 10,
 	}
 	raw, err := s.Do(actionListFiles, input)
 	if err != nil {
@@ -378,8 +383,57 @@ func (s *Session) FindSpreadsheetByName(name string) (*DriveFile, error) {
 	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &out)
 	}
-	if len(out.Files) == 0 {
-		return nil, nil
+	return out.Files, nil
+}
+
+// FindSpreadsheetByName returns the account's newest non-trashed Sheets file
+// whose title is exactly name, or (nil, nil) when none exists. It powers the
+// create action's "reuse existing" option: the Sheets create API always makes a
+// new file (Drive allows duplicate names), so the dedupe is a Drive name lookup.
+func (s *Session) FindSpreadsheetByName(name string) (*DriveFile, error) {
+	files, err := s.spreadsheetsNamed(name)
+	if err != nil || len(files) == 0 {
+		return nil, err
 	}
-	return &out.Files[0], nil
+	return &files[0], nil
+}
+
+// ResolveSpreadsheetID turns whatever a user gave for a spreadsheet — a name
+// (picked from the list or typed), a pasted URL, or a bare id / {{$.path}} token
+// that resolved to one — into the bare id the Sheets actions need. This is where
+// the plugin, not the user, owns the name→id mapping:
+//
+//   - a pasted Sheets URL yields its id directly;
+//   - a reference that already looks like an id is used as-is (no Drive call, so
+//     an id or token works even without Drive scope);
+//   - otherwise the reference is looked up as a file NAME in Drive: one match
+//     yields its id; several same-named files are an ambiguity error; no match
+//     falls back to using the reference as an id (a clear 404 follows if it is
+//     neither a name nor an id).
+//
+// The name lookup needs Drive read scope. An empty ref is returned unchanged so
+// the caller's required-input check owns that message.
+func (s *Session) ResolveSpreadsheetID(ref string) (string, error) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return "", nil
+	}
+	if m := sheetURLRe.FindStringSubmatch(ref); m != nil {
+		return m[1], nil
+	}
+	if looksLikeID.MatchString(ref) {
+		return ref, nil
+	}
+	files, err := s.spreadsheetsNamed(ref)
+	if err != nil {
+		return "", err
+	}
+	switch len(files) {
+	case 0:
+		return ref, nil // not a known name — assume it is already an id
+	case 1:
+		return files[0].ID, nil
+	default:
+		return "", fmt.Errorf("%d spreadsheets are named %q — rename one so the name is unique, or paste its id / URL instead", len(files), ref)
+	}
 }

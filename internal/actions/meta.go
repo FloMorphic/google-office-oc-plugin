@@ -5,7 +5,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/FloMorphic/google-office-oc-plugin/internal/oc"
 	"github.com/Inflowenger/go-plugin-sdk/formkit"
 	"github.com/Inflowenger/go-plugin-sdk/sdkv1"
 )
@@ -54,9 +53,13 @@ func (r *Registry) metaSpreadsheetsList(req sdkv1.Request) any {
 		return formkit.Warning("No spreadsheets found for account %s.", sess.Account.Name()).About(target).Patch(nil)
 	}
 
+	// The value written is the file NAME, not its id: the plugin resolves the
+	// name back to an id at run time (Session.ResolveSpreadsheetID), so the user
+	// never handles an id. The field stays typable, so a name not in this list
+	// (or a pasted id / URL / {{$.path}} token) still works.
 	options := make([]formkit.Option, 0, len(files))
 	for _, f := range files {
-		options = append(options, formkit.Option{Value: f.ID, Label: f.Name})
+		options = append(options, formkit.Option{Value: f.Name, Label: f.Name})
 	}
 	return formkit.Choose(
 		form,
@@ -94,9 +97,9 @@ func (r *Registry) metaSheetsList(req sdkv1.Request) any {
 		return formkit.Failure("internal: no form to rebuild for this field").About(target).Patch(nil)
 	}
 
-	spreadsheetID := text(pick(body, "spreadsheetId"))
-	if spreadsheetID == "" {
-		return formkit.Warning("Enter the Spreadsheet id first, then press Load sheets.").About(target).Patch(nil)
+	spreadsheetRef := text(pick(body, "spreadsheetId"))
+	if spreadsheetRef == "" {
+		return formkit.Warning("Choose or type the Spreadsheet first, then press Load sheets.").About(target).Patch(nil)
 	}
 
 	alias, connection := settingsFrom(body)
@@ -104,10 +107,13 @@ func (r *Registry) metaSheetsList(req sdkv1.Request) any {
 	if err != nil {
 		return formkit.Failure("%s", err.Error()).About(target).Patch(nil)
 	}
-	id := oc.SpreadsheetID(spreadsheetID)
+	id, err := sess.ResolveSpreadsheetID(spreadsheetRef)
+	if err != nil {
+		return formkit.Failure("%s%s  [for spreadsheet %q as account %s]", err.Error(), driveScopeHint(err), spreadsheetRef, sess.Account.Name()).About(target).Patch(nil)
+	}
 	tabs, err := sess.Sheets(id, false)
 	if err != nil {
-		return formkit.Failure("%s%s  [tried id %q as account %s]", err.Error(), notFoundHint(err), id, sess.Account.Name()).About(target).Patch(nil)
+		return formkit.Failure("%s%s  [tried %q → id %q as account %s]", err.Error(), notFoundHint(err), spreadsheetRef, id, sess.Account.Name()).About(target).Patch(nil)
 	}
 	if len(tabs) == 0 {
 		return formkit.Warning("No sheets found in that spreadsheet.").About(target).Patch(nil)
@@ -137,7 +143,7 @@ func (r *Registry) metaSheetsList(req sdkv1.Request) any {
 func notFoundHint(err error) string {
 	msg := strings.ToLower(err.Error())
 	if strings.Contains(msg, "not_found") || strings.Contains(msg, "not found") || strings.Contains(msg, "404") {
-		return " — check the Spreadsheet id is correct and that the connected Google account can open this spreadsheet (it must be the owner or shared with it)."
+		return " — check the spreadsheet name (or id) is correct and that the connected Google account can open this spreadsheet (it must be the owner or shared with it)."
 	}
 	return ""
 }

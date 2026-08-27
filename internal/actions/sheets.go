@@ -108,7 +108,11 @@ func (r *Registry) sheetsAddSheet() sdkv1.Action {
 			if err := requireAll(nv("spreadsheetId", in.SpreadsheetID), nv("title", in.Title)); err != nil {
 				return nil, err
 			}
-			in.SpreadsheetID = oc.SpreadsheetID(in.SpreadsheetID)
+			id, err := sess.ResolveSpreadsheetID(in.SpreadsheetID)
+			if err != nil {
+				return nil, err
+			}
+			in.SpreadsheetID = id
 			raw, err := sess.Do("googlesheets.add_sheet", in)
 			if err != nil {
 				return nil, err
@@ -145,7 +149,11 @@ func (r *Registry) sheetsGetValues() sdkv1.Action {
 			if len(in.Ranges) == 0 {
 				return nil, errNoRanges
 			}
-			in.SpreadsheetID = oc.SpreadsheetID(in.SpreadsheetID)
+			id, err := sess.ResolveSpreadsheetID(in.SpreadsheetID)
+			if err != nil {
+				return nil, err
+			}
+			in.SpreadsheetID = id
 			raw, err := sess.Do("googlesheets.batch_get", in)
 			if err != nil {
 				return nil, err
@@ -174,7 +182,11 @@ func (r *Registry) sheetsClearValues() sdkv1.Action {
 			if err := requireAll(nv("spreadsheetId", in.SpreadsheetID), nv("range", in.Range)); err != nil {
 				return nil, err
 			}
-			in.SpreadsheetID = oc.SpreadsheetID(in.SpreadsheetID)
+			id, err := sess.ResolveSpreadsheetID(in.SpreadsheetID)
+			if err != nil {
+				return nil, err
+			}
+			in.SpreadsheetID = id
 			raw, err := sess.Do("googlesheets.clear_values", in)
 			if err != nil {
 				return nil, err
@@ -215,7 +227,11 @@ func (r *Registry) sheetsAggregateColumn() sdkv1.Action {
 			); err != nil {
 				return nil, err
 			}
-			in.SpreadsheetID = oc.SpreadsheetID(in.SpreadsheetID)
+			id, err := sess.ResolveSpreadsheetID(in.SpreadsheetID)
+			if err != nil {
+				return nil, err
+			}
+			in.SpreadsheetID = id
 			raw, err := sess.Do("googlesheets.aggregate_column_data", in)
 			if err != nil {
 				return nil, err
