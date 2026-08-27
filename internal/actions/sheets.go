@@ -2,6 +2,7 @@ package actions
 
 import (
 	"errors"
+	"strings"
 
 	"github.com/FloMorphic/google-office-oc-plugin/internal/oc"
 	"github.com/Inflowenger/go-plugin-sdk/sdkv1"
@@ -46,7 +47,8 @@ func (r *Registry) sheetsActions() []sdkv1.Action {
 // ---------------------------------------------------------- create sheet --
 
 type sheetsCreateInput struct {
-	Title string `json:"title,omitempty"`
+	Title       string `json:"title,omitempty"`
+	ReuseByName bool   `json:"reuseByName,omitempty"`
 }
 
 func (r *Registry) sheetsCreateSpreadsheet() sdkv1.Action {
@@ -58,7 +60,26 @@ func (r *Registry) sheetsCreateSpreadsheet() sdkv1.Action {
 		Tags:        sheetsClass(),
 		Form:        sheetsCreateForm,
 		RequestHandler: run(r, "create spreadsheet", func(job *sdkv1.Job, sess *oc.Session, in sheetsCreateInput) (map[string]any, error) {
-			raw, err := sess.Do("googlesheets.create_google_sheet1", in)
+			// The Sheets create API always makes a new file (Drive allows
+			// duplicate names). When asked to reuse, look the title up in Drive
+			// first and return the existing spreadsheet instead of a duplicate.
+			if in.ReuseByName && strings.TrimSpace(in.Title) != "" {
+				existing, err := sess.FindSpreadsheetByName(in.Title)
+				if err != nil {
+					return nil, err
+				}
+				if existing != nil {
+					return map[string]any{
+						"spreadsheetId": existing.ID,
+						"title":         existing.Name,
+						"url":           "https://docs.google.com/spreadsheets/d/" + existing.ID + "/edit",
+						"reused":        true,
+					}, nil
+				}
+			}
+			// ReuseByName is not a create_google_sheet1 field — strip it before
+			// forwarding so the gateway sees only the title it expects.
+			raw, err := sess.Do("googlesheets.create_google_sheet1", sheetsCreateInput{Title: in.Title})
 			if err != nil {
 				return nil, err
 			}

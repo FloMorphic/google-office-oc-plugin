@@ -346,3 +346,40 @@ func (s *Session) Spreadsheets() ([]DriveFile, error) {
 	}
 	return out.Files, nil
 }
+
+// driveNameQuoteRe escapes a Drive `q` string literal: a name may contain single
+// quotes or backslashes, both of which must be backslash-escaped or the query is
+// a 400 (or, worse, injects extra clauses).
+var driveNameQuoteRe = strings.NewReplacer(`\`, `\\`, `'`, `\'`)
+
+// FindSpreadsheetByName returns the account's newest non-trashed Sheets file
+// whose title is exactly name, or (nil, nil) when none exists. It powers the
+// create action's "reuse existing" option: the Sheets create API always makes a
+// new file (Drive allows duplicate names), so the dedupe is a Drive name lookup.
+// name is matched verbatim (case-sensitive, as Drive stores it) and quote-escaped
+// for the `q` literal. Like Spreadsheets, it needs Drive read scope.
+func (s *Session) FindSpreadsheetByName(name string) (*DriveFile, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, nil
+	}
+	input := map[string]any{
+		"q":        fmt.Sprintf("name = '%s' and mimeType='%s' and trashed=false", driveNameQuoteRe.Replace(name), mimeSpreadsheet),
+		"orderBy":  "modifiedTime desc",
+		"pageSize": 1,
+	}
+	raw, err := s.Do(actionListFiles, input)
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		Files []DriveFile `json:"files"`
+	}
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &out)
+	}
+	if len(out.Files) == 0 {
+		return nil, nil
+	}
+	return &out.Files[0], nil
+}

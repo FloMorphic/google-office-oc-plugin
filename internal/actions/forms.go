@@ -68,6 +68,9 @@ var sheetsCreateForm = formkit.New("Create spreadsheet").
 	Add(
 		formkit.Text("title", "Title").
 			Describe("Name for the new spreadsheet. Accepts {{$.path}} tokens. Leave empty for an untitled spreadsheet."),
+		formkit.Bool("reuseByName", "Reuse existing spreadsheet with this title").
+			Default(false).
+			Describe("Before creating, look up this exact title in Drive; if a spreadsheet already exists, return it instead of creating a duplicate. Off always creates a new file. (Needs Drive read scope; title match is case-sensitive.)"),
 	).
 	Build()
 
