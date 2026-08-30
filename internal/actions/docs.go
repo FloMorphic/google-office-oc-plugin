@@ -83,18 +83,27 @@ func (r *Registry) docsCreateDocument() sdkv1.Action {
 					}, nil
 				}
 			}
-			// ReuseByName is not a create_document field — forward only title/text.
-			payload := map[string]any{"title": in.Title}
-			if strings.TrimSpace(in.Text) != "" {
-				payload["text"] = in.Text
-			}
-			raw, err := sess.Do("googledocs.create_document", payload)
+			// Google's documents.create takes only a title — it cannot set body
+			// content, so any "text" here is dropped (the gateway serializes its
+			// unset content as a literal "null" into the doc). Create with the title
+			// alone, then append the initial text with a second insert_text call.
+			raw, err := sess.Do("googledocs.create_document", map[string]any{"title": in.Title})
 			if err != nil {
 				return nil, err
 			}
 			out := object(raw)
-			if id, ok := out["documentId"].(string); ok && id != "" {
+			id, _ := out["documentId"].(string)
+			if id != "" {
 				out["url"] = docLink(id)
+			}
+			if text := strings.TrimSpace(in.Text); text != "" && id != "" {
+				if _, err := sess.Do("googledocs.insert_text_action", map[string]any{
+					"document_id":    id,
+					"text_to_insert": in.Text,
+					"append_to_end":  true,
+				}); err != nil {
+					return nil, err
+				}
 			}
 			return out, nil
 		}),
