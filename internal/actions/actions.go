@@ -48,6 +48,8 @@ func (r *Registry) All() []sdkv1.Action {
 	var all []sdkv1.Action
 	all = append(all, r.sheetsActions()...)
 	all = append(all, r.docsActions()...)
+	all = append(all, r.driveActions()...)
+	all = append(all, r.calendarActions()...)
 	return all
 }
 

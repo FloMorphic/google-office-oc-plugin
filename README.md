@@ -180,9 +180,17 @@ flow and running it.
 
 ```
 main.go                        entry point: identity, intro, register nodes/metas, block
-internal/oc/client.go          the OpenConnector proxy client (connections, catalog, run)
-internal/actions/actions.go    node wiring + the generic run handler + result decoding
-internal/actions/forms.go      formkit forms: settings + the per-service run form
-internal/actions/meta.go       account list/test + per-service action-catalog pickers
-internal/actions/vars.go       {{$.path}} token resolution over the JSON input
+internal/oc/client.go          the generic OpenConnector proxy client (connections, account resolution, run)
+internal/oc/files.go           shared Drive file plumbing (list/name→id) + the Drive-node helpers
+internal/oc/sheets.go          Sheets session helpers (tabs, spreadsheet resolve)
+internal/oc/docs.go            Docs session helpers (document resolve)
+internal/oc/calendar.go        Calendar session helpers (calendar list)
+internal/actions/actions.go    node wiring + the shared job handler + result decoding
+internal/actions/sheets.go     Sheets actions
+internal/actions/docs.go       Docs actions
+internal/actions/drive.go      Drive actions
+internal/actions/calendar.go   Calendar actions
+internal/actions/forms.go      formkit forms: settings + each action's form
+internal/actions/meta.go       account list/test + the dependent-field (file/folder/tab) pickers
+internal/actions/vars.go       {{$.path}} token resolution over the action input
 ```

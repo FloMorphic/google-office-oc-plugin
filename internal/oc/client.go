@@ -11,36 +11,19 @@
 //
 // Reaching the proxy needs an OPEN (multi) runtime credential — a strict,
 // plugin-scoped credential cannot publish on `flomorphic.>`. See the README.
+//
+// This file holds the GENERIC proxy client — connections, account resolution,
+// and running one action as an account. The per-product helpers a picker or
+// action needs live beside their product: files.go (Drive), sheets.go, docs.go.
 package oc
 
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/nats-io/nats.go"
 )
-
-// sheetURLRe pulls the bare spreadsheet id out of a pasted Google Sheets URL
-// (…/spreadsheets/d/<ID>/edit…). Ids are URL-safe base64: letters, digits, - _.
-var sheetURLRe = regexp.MustCompile(`/spreadsheets/d/([A-Za-z0-9_-]+)`)
-
-// docURLRe pulls the bare document id out of a pasted Google Docs URL
-// (…/document/d/<ID>/edit…), the Docs analog of sheetURLRe.
-var docURLRe = regexp.MustCompile(`/document/d/([A-Za-z0-9_-]+)`)
-
-// SpreadsheetID normalizes a spreadsheet reference to the bare id the Sheets API
-// wants: if a full URL was pasted (a very common mistake that Google answers
-// with a bare 404), the id is extracted; otherwise the trimmed input is returned
-// unchanged.
-func SpreadsheetID(ref string) string {
-	ref = strings.TrimSpace(ref)
-	if m := sheetURLRe.FindStringSubmatch(ref); m != nil {
-		return m[1]
-	}
-	return ref
-}
 
 // ServicePrefix is the family this plugin targets. A connected Google account
 // reports a service id that starts with "google" (googlesheets, googledrive,
@@ -266,202 +249,4 @@ func (s *Session) Do(action string, input any) (json.RawMessage, error) {
 		return env.Data, nil
 	}
 	return raw, nil
-}
-
-// actionGetSheetNames is the read action that lists a spreadsheet's sheets (tabs)
-// and returns a stable name→sheetId map. It backs the "Load sheets" / "Check"
-// dependent-field pickers (GET /v1/actions?service=googlesheets).
-const actionGetSheetNames = "googlesheets.get_sheet_names"
-
-// SheetTab is one sheet (tab) inside a spreadsheet: its human title (what
-// get_values and aggregate speak in) and its numeric id (what the
-// batch/dimension/chart actions want).
-type SheetTab struct {
-	ID    int
-	Title string
-}
-
-// Sheets lists a spreadsheet's tabs as this account, so a picker can offer them
-// by title (value) while showing the numeric sheetId (label). excludeHidden
-// drops hidden tabs. The order follows the gateway's sheetNames; the id comes
-// from its sheetIdByName map, and the output is read leniently so a schema tweak
-// degrades to "no tabs" rather than an error.
-func (s *Session) Sheets(spreadsheetID string, excludeHidden bool) ([]SheetTab, error) {
-	spreadsheetID = SpreadsheetID(spreadsheetID)
-	input := map[string]any{"spreadsheetId": spreadsheetID}
-	if excludeHidden {
-		input["excludeHidden"] = true
-	}
-	raw, err := s.Do(actionGetSheetNames, input)
-	if err != nil {
-		return nil, err
-	}
-	var out struct {
-		SheetNames    []string       `json:"sheetNames"`
-		SheetIDByName map[string]int `json:"sheetIdByName"`
-	}
-	if len(raw) > 0 {
-		_ = json.Unmarshal(raw, &out)
-	}
-	tabs := make([]SheetTab, 0, len(out.SheetNames))
-	for _, name := range out.SheetNames {
-		tabs = append(tabs, SheetTab{ID: out.SheetIDByName[name], Title: name})
-	}
-	return tabs, nil
-}
-
-// actionListFiles is the Google Drive action that lists files. Listing the
-// account's Sheets or Docs FILES is a Drive operation (the Sheets/Docs APIs
-// cannot); filtering to a mime type gives just that product's files. It backs
-// the "Load spreadsheets" / "Load documents" pickers.
-const actionListFiles = "googledrive.files.list"
-
-// The Google Drive mime types of the files this plugin lists.
-const (
-	mimeSpreadsheet = "application/vnd.google-apps.spreadsheet"
-	mimeDocument    = "application/vnd.google-apps.document"
-)
-
-// DriveFile is one Drive file the account can see: its id (what a Sheets/Docs
-// action wants as the file id) and its name.
-type DriveFile struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
-}
-
-// listFiles runs one googledrive.files.list query and reads its
-// { files:[{id,name}] } output leniently, so a schema tweak degrades to "no
-// files" rather than an error. The `q` is caller-built; results are
-// most-recently-modified first. Needs Drive read scope, or the gateway answers
-// 403.
-func (s *Session) listFiles(q string, pageSize int) ([]DriveFile, error) {
-	raw, err := s.Do(actionListFiles, map[string]any{
-		"q":        q,
-		"orderBy":  "modifiedTime desc",
-		"pageSize": pageSize,
-	})
-	if err != nil {
-		return nil, err
-	}
-	var out struct {
-		Files []DriveFile `json:"files"`
-	}
-	if len(raw) > 0 {
-		_ = json.Unmarshal(raw, &out)
-	}
-	return out.Files, nil
-}
-
-// filesOfType lists up to 100 of the account's non-trashed files of one mime
-// type, newest first — for the "Load …" file pickers.
-func (s *Session) filesOfType(mime string) ([]DriveFile, error) {
-	return s.listFiles(fmt.Sprintf("mimeType='%s' and trashed=false", mime), 100)
-}
-
-// driveNameQuoteRe escapes a Drive `q` string literal: a name may contain single
-// quotes or backslashes, both of which must be backslash-escaped or the query is
-// a 400 (or, worse, injects extra clauses).
-var driveNameQuoteRe = strings.NewReplacer(`\`, `\\`, `'`, `\'`)
-
-// looksLikeID matches a bare Drive file id: 40+ URL-safe base64 chars, which no
-// human-typed file NAME realistically is. A reference that looks like an id
-// skips the Drive name lookup, so a pasted id or an upstream token still
-// resolves for an account that has only Sheets/Docs scope (no Drive read
-// access).
-var looksLikeID = regexp.MustCompile(`^[A-Za-z0-9_-]{40,}$`)
-
-// filesNamed lists the account's non-trashed files of one mime type whose title
-// is exactly name — case-sensitive, as Drive stores it — newest first. An empty
-// name yields nil. name is quote-escaped for the `q` literal.
-func (s *Session) filesNamed(name, mime string) ([]DriveFile, error) {
-	name = strings.TrimSpace(name)
-	if name == "" {
-		return nil, nil
-	}
-	return s.listFiles(fmt.Sprintf("name = '%s' and mimeType='%s' and trashed=false", driveNameQuoteRe.Replace(name), mime), 10)
-}
-
-// resolveFileID turns whatever a user gave for a file — a name (picked from the
-// list or typed), a pasted URL, or a bare id / {{$.path}} token that resolved to
-// one — into the bare id the Sheets/Docs actions need. This is where the plugin,
-// not the user, owns the name→id mapping:
-//
-//   - a pasted URL yields its id directly (via urlRe);
-//   - a reference that already looks like an id is used as-is (no Drive call, so
-//     an id or token works even without Drive scope);
-//   - otherwise the reference is looked up as a file NAME in Drive: one match
-//     yields its id; several same-named files are an ambiguity error; no match
-//     falls back to using the reference as an id (a clear 404 follows if it is
-//     neither a name nor an id).
-//
-// kind ("spreadsheet"/"document") only shapes the ambiguity message. The name
-// lookup needs Drive read scope. An empty ref is returned unchanged so the
-// caller's required-input check owns that message.
-func (s *Session) resolveFileID(ref, kind, mime string, urlRe *regexp.Regexp) (string, error) {
-	ref = strings.TrimSpace(ref)
-	if ref == "" {
-		return "", nil
-	}
-	if m := urlRe.FindStringSubmatch(ref); m != nil {
-		return m[1], nil
-	}
-	if looksLikeID.MatchString(ref) {
-		return ref, nil
-	}
-	files, err := s.filesNamed(ref, mime)
-	if err != nil {
-		return "", err
-	}
-	switch len(files) {
-	case 0:
-		return ref, nil // not a known name — assume it is already an id
-	case 1:
-		return files[0].ID, nil
-	default:
-		return "", fmt.Errorf("%d %ss are named %q — rename one so the name is unique, or paste its id / URL instead", len(files), kind, ref)
-	}
-}
-
-// Spreadsheets lists the account's Google Sheets files for the spreadsheetId
-// picker. See filesOfType. Needs Drive read scope.
-func (s *Session) Spreadsheets() ([]DriveFile, error) { return s.filesOfType(mimeSpreadsheet) }
-
-// FindSpreadsheetByName returns the account's newest non-trashed Sheets file
-// whose title is exactly name, or (nil, nil) when none exists. It powers the
-// create action's "reuse existing" option: the Sheets create API always makes a
-// new file (Drive allows duplicate names), so the dedupe is a Drive name lookup.
-func (s *Session) FindSpreadsheetByName(name string) (*DriveFile, error) {
-	return firstFile(s.filesNamed(name, mimeSpreadsheet))
-}
-
-// ResolveSpreadsheetID resolves a spreadsheet reference (name / URL / id / token)
-// to the bare id the Sheets actions need. See resolveFileID.
-func (s *Session) ResolveSpreadsheetID(ref string) (string, error) {
-	return s.resolveFileID(ref, "spreadsheet", mimeSpreadsheet, sheetURLRe)
-}
-
-// Documents lists the account's Google Docs files for the documentId picker.
-// See filesOfType. Needs Drive read scope.
-func (s *Session) Documents() ([]DriveFile, error) { return s.filesOfType(mimeDocument) }
-
-// FindDocumentByName returns the account's newest non-trashed Docs file whose
-// title is exactly name, or (nil, nil) when none exists. It powers the create
-// action's "reuse existing" option, the Docs analog of FindSpreadsheetByName.
-func (s *Session) FindDocumentByName(name string) (*DriveFile, error) {
-	return firstFile(s.filesNamed(name, mimeDocument))
-}
-
-// ResolveDocumentID resolves a document reference (name / URL / id / token) to
-// the bare id the Docs actions need. See resolveFileID.
-func (s *Session) ResolveDocumentID(ref string) (string, error) {
-	return s.resolveFileID(ref, "document", mimeDocument, docURLRe)
-}
-
-// firstFile adapts a name lookup to the "reuse existing" callers: the newest
-// match, or (nil, nil) when the list is empty (or the lookup errored).
-func firstFile(files []DriveFile, err error) (*DriveFile, error) {
-	if err != nil || len(files) == 0 {
-		return nil, err
-	}
-	return &files[0], nil
 }

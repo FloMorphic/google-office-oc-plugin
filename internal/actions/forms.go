@@ -234,3 +234,350 @@ var docsExportPDFForm = formkit.New("Export as PDF").
 			Describe("Filename for the exported PDF. Accepts {{$.path}} tokens. Leave empty to use the document title."),
 	).
 	Build()
+
+// ------------------------------------------------------------- drive forms --
+
+// The shared tails for the Drive node's "File" / "Folder" field descriptions.
+const (
+	driveFilePickHint   = "Press ↻ Load files to pick one, or type its exact name (an id, URL, or {{$.path}} token also works)."
+	driveFolderPickHint = "Press ↻ Load folders to pick one, or type its exact name (an id, URL, or {{$.path}} token also works)."
+)
+
+// driveFileField is the required "File" input the Drive actions take. Like the
+// Sheets/Docs id fields it is NAME-first: a "Load files" button lists the account's
+// Drive files (any type) and rebuilds this field into a drop-down of their names;
+// the plugin resolves the name back to an id at run time (ResolveDriveFileID).
+// ownerMethod is the action whose form the picker rebuilds. The field stays
+// typable, so a name outside the list — or a pasted id / URL / {{$.path}} token —
+// still resolves.
+func driveFileField(describe, ownerMethod string) *formkit.Field {
+	return formkit.Text("fileId", "File").
+		Required().
+		Describe(describe).
+		Lookup("googledrive.meta.files.list", "Load files").
+		Picks(ownerMethod)
+}
+
+// driveFolderField is a "Folder" input (a parent, or a move destination). A "Load
+// folders" button lists the account's folders and rebuilds it into a drop-down;
+// the plugin resolves the name back to an id at run time (ResolveFolderID). key
+// names the field (parentId / destinationFolderId / folderId), required marks it
+// mandatory, and ownerMethod is the action whose form the picker rebuilds.
+func driveFolderField(key, label, describe, ownerMethod string, required bool) *formkit.Field {
+	f := formkit.Text(key, label).
+		Describe(describe).
+		Lookup("googledrive.meta.folders.list", "Load folders").
+		Picks(ownerMethod)
+	if required {
+		f = f.Required()
+	}
+	return f
+}
+
+var driveListForm = formkit.New("List files").
+	Add(
+		formkit.Text("query", "Drive query").
+			Describe("Advanced: a raw Google Drive query string, e.g. \"mimeType='application/pdf' and trashed=false\". When set, it is used verbatim and the fields below are ignored. Accepts {{$.path}} tokens."),
+		formkit.Text("nameContains", "Name contains").
+			Describe("Convenience filter: return files whose name contains this text. Ignored when Drive query is set. Accepts {{$.path}} tokens."),
+		driveFolderField("folderId", "In folder", "Convenience filter: only files inside this folder. "+driveFolderPickHint+" Ignored when Drive query is set.", "googledrive.files.list", false),
+		formkit.Bool("includeTrashed", "Include trashed").
+			Default(false).
+			Describe("Include files in the trash. Ignored when Drive query is set."),
+		formkit.Integer("pageSize", "Max results").
+			Min(1).Max(1000).
+			Describe("Maximum number of files to return (1–1000). Empty uses the API default."),
+		formkit.Text("orderBy", "Order by").
+			Describe("Advanced: a comma-separated list of sort keys, e.g. \"modifiedTime desc,name\". Empty sorts by most recently modified."),
+	).
+	Build()
+
+var driveGetForm = formkit.New("Get file").
+	Add(
+		driveFileField("The file to read, by name. "+driveFilePickHint, "googledrive.files.get"),
+		formkit.Bool("includeSharedDrives", "Search shared drives").
+			Default(false).
+			Describe("Also look in shared drives when locating the file."),
+	).
+	Build()
+
+var driveCreateFolderForm = formkit.New("Create folder").
+	Add(
+		formkit.Text("name", "Name").
+			Required().
+			Describe("Name for the new folder. Accepts {{$.path}} tokens."),
+		driveFolderField("parentId", "Parent folder", "Optional. Create the folder inside this folder. "+driveFolderPickHint+" Leave empty for My Drive (root).", "googledrive.create_folder", false),
+		formkit.Bool("reuseByName", "Reuse existing folder with this name").
+			Default(false).
+			Describe("Before creating, look up this exact name in Drive; if a folder already exists, return it instead of creating a duplicate. Off always creates a new folder. (Needs Drive read scope; name match is case-sensitive.)"),
+	).
+	Build()
+
+var driveCopyForm = formkit.New("Copy file").
+	Add(
+		driveFileField("The file to copy, by name. "+driveFilePickHint, "googledrive.files.copy"),
+		formkit.Text("name", "New name").
+			Describe("Name for the copy. Accepts {{$.path}} tokens. Leave empty to let Google name it (\"Copy of …\")."),
+		driveFolderField("parentId", "Into folder", "Optional. Place the copy in this folder. "+driveFolderPickHint+" Leave empty to copy alongside the original.", "googledrive.files.copy", false),
+	).
+	Build()
+
+var driveMoveForm = formkit.New("Move file").
+	Add(
+		driveFileField("The file to move, by name. "+driveFilePickHint, "googledrive.move_file"),
+		driveFolderField("destinationFolderId", "Destination folder", "The folder to move the file into. "+driveFolderPickHint, "googledrive.move_file", true),
+	).
+	Build()
+
+var driveRenameForm = formkit.New("Rename file").
+	Add(
+		driveFileField("The file or folder to rename, by name. "+driveFilePickHint, "googledrive.rename_file"),
+		formkit.Text("newName", "New name").
+			Required().
+			Describe("The new name. Accepts {{$.path}} tokens."),
+	).
+	Build()
+
+var driveDeleteForm = formkit.New("Delete file").
+	Add(
+		driveFileField("The file to delete, by name. "+driveFilePickHint, "googledrive.delete_file"),
+		formkit.Bool("permanent", "Delete permanently").
+			Default(false).
+			Describe("Off (default) moves the file to the trash, where it can be restored. On deletes it permanently and irreversibly."),
+	).
+	Build()
+
+var driveShareForm = formkit.New("Share file").
+	Add(
+		driveFileField("The file to share, by name. "+driveFilePickHint, "googledrive.share_file"),
+		formkit.Enum("role", "Role", "reader", "commenter", "writer", "fileOrganizer", "organizer", "owner").
+			Required().
+			Default("reader").
+			Describe("The access level to grant."),
+		formkit.Enum("type", "Grantee type", "user", "group", "domain", "anyone").
+			Required().
+			Default("user").
+			Describe("Who the grant is for. user/group need an email; domain needs a domain; anyone shares with anyone who has the link."),
+		formkit.Text("emailAddress", "Email address").
+			Describe("The user or group email to share with (required for user/group). Accepts {{$.path}} tokens."),
+		formkit.Text("domain", "Domain").
+			Describe("The domain to share with, e.g. \"example.com\" (required for a domain grant)."),
+		formkit.Bool("sendNotificationEmail", "Send notification email").
+			Default(false).
+			Describe("Email the grantee that the file was shared. Off is quieter for automation; access is granted either way."),
+		formkit.TextArea("message", "Notification message").
+			Describe("Optional message to include in the notification email. Only used when Send notification email is on. Accepts {{$.path}} tokens."),
+	).
+	Build()
+
+var driveExportForm = formkit.New("Export file").
+	Add(
+		driveFileField("The Google Workspace file to export, by name. "+driveFilePickHint, "googledrive.export_file"),
+		formkit.Text("mimeType", "Export as (MIME type)").
+			Required().
+			Describe("The target format's MIME type, e.g. \"application/pdf\", \"text/plain\", \"text/csv\", or \"application/vnd.openxmlformats-officedocument.wordprocessingml.document\" (.docx). Accepts {{$.path}} tokens."),
+	).
+	Build()
+
+// ---------------------------------------------------------- calendar forms --
+
+// calendarPickHint is the shared tail for a "Calendar" field's description.
+const calendarPickHint = "Press ↻ Load calendars to pick one, or type a calendar id / email. Empty uses your primary calendar."
+
+// timeHint documents the start/end format the event actions accept.
+const timeHint = "For a timed event use RFC 3339, e.g. \"2026-09-01T14:00:00-07:00\"; for an all-day event turn on All-day and use a date, e.g. \"2026-09-01\". Accepts {{$.path}} tokens."
+
+// calendarIDField is a "Calendar" input. A "Load calendars" button lists the
+// account's calendars and rebuilds the field into a drop-down (value = calendar
+// id, label = summary); the id is used directly, so the field is typable for
+// "primary" or a pasted id, and empty falls back to the primary calendar.
+// ownerMethod is the action whose form the picker rebuilds.
+func calendarIDField(key, label, ownerMethod string) *formkit.Field {
+	return formkit.Text(key, label).
+		Describe("The calendar. "+calendarPickHint).
+		Lookup("googlecalendar.meta.calendars.list", "Load calendars").
+		Picks(ownerMethod)
+}
+
+// sendUpdatesField is the shared "Notify attendees" control (all/externalOnly/
+// none), defaulting to none so automation stays quiet unless asked otherwise.
+func sendUpdatesField() *formkit.Field {
+	return formkit.Enum("sendUpdates", "Notify attendees", "none", "all", "externalOnly").
+		Default("none").
+		Describe("Who to email about this change: none (quiet, the default), all attendees, or externalOnly (only guests outside your organization).")
+}
+
+var calendarListCalendarsForm = formkit.New("List calendars").
+	Add(
+		formkit.Bool("showHidden", "Include hidden").
+			Default(false).
+			Describe("Include calendars hidden from the list."),
+		formkit.Bool("showDeleted", "Include deleted").
+			Default(false).
+			Describe("Include deleted calendar-list entries."),
+	).
+	Build()
+
+var calendarListEventsForm = formkit.New("List events").
+	Add(
+		calendarIDField("calendarId", "Calendar", "googlecalendar.list_events"),
+		formkit.Text("q", "Search text").
+			Describe("Optional free-text search over event fields (summary, description, location, attendees). Accepts {{$.path}} tokens."),
+		formkit.Text("timeMin", "Start of window").
+			Describe("Only events ending after this RFC 3339 time, e.g. \"2026-09-01T00:00:00Z\". Accepts {{$.path}} tokens."),
+		formkit.Text("timeMax", "End of window").
+			Describe("Only events starting before this RFC 3339 time. Accepts {{$.path}} tokens."),
+		formkit.Enum("orderBy", "Order by", "", "startTime", "updated").
+			Default("startTime").
+			Describe("Sort order. \"startTime\" (default) requires single events, which is on."),
+		formkit.Integer("maxResults", "Max results").
+			Min(1).Max(2500).
+			Describe("Maximum number of events to return. Empty uses the API default."),
+		formkit.Text("timeZone", "Time zone").
+			Describe("IANA time zone for the response, e.g. \"America/Los_Angeles\". Empty uses the calendar's zone."),
+		formkit.Bool("showDeleted", "Include cancelled").
+			Default(false).
+			Describe("Include cancelled events in the results."),
+	).
+	Build()
+
+var calendarGetEventForm = formkit.New("Get event").
+	Add(
+		calendarIDField("calendarId", "Calendar", "googlecalendar.get_event"),
+		formkit.Text("eventId", "Event id").
+			Required().
+			Describe("The id of the event to read. Accepts {{$.path}} tokens."),
+	).
+	Build()
+
+var calendarCreateEventForm = formkit.New("Create event").
+	Add(
+		calendarIDField("calendarId", "Calendar", "googlecalendar.create_event"),
+		formkit.Text("summary", "Title").
+			Required().
+			Describe("The event title. Accepts {{$.path}} tokens."),
+		formkit.Text("start", "Start").
+			Required().
+			Describe("When the event starts. "+timeHint),
+		formkit.Text("end", "End").
+			Required().
+			Describe("When the event ends. "+timeHint),
+		formkit.Bool("allDay", "All-day event").
+			Default(false).
+			Describe("Treat Start/End as dates (YYYY-MM-DD) for an all-day event instead of timestamps."),
+		formkit.Text("timeZone", "Time zone").
+			Describe("IANA time zone for the start/end times, e.g. \"America/Los_Angeles\". Ignored for all-day events."),
+		formkit.Text("location", "Location").
+			Describe("Optional location text. Accepts {{$.path}} tokens."),
+		formkit.TextArea("description", "Description").
+			Describe("Optional event description. Accepts {{$.path}} tokens."),
+		formkit.List("attendees", "Attendees").
+			Describe("Optional attendee email addresses, one per entry. Each accepts {{$.path}} tokens."),
+		sendUpdatesField(),
+	).
+	Build()
+
+var calendarQuickAddForm = formkit.New("Quick add event").
+	Add(
+		calendarIDField("calendarId", "Calendar", "googlecalendar.quick_add_event"),
+		formkit.Text("text", "Phrase").
+			Required().
+			Describe("A natural-language description of the event, e.g. \"Lunch with Sam tomorrow 1pm\". Accepts {{$.path}} tokens."),
+		sendUpdatesField(),
+	).
+	Build()
+
+var calendarUpdateEventForm = formkit.New("Update event").
+	Add(
+		calendarIDField("calendarId", "Calendar", "googlecalendar.patch_event"),
+		formkit.Text("eventId", "Event id").
+			Required().
+			Describe("The id of the event to update. Accepts {{$.path}} tokens."),
+		formkit.Text("summary", "Title").
+			Describe("New title. Leave empty to keep the current one. Accepts {{$.path}} tokens."),
+		formkit.Text("start", "Start").
+			Describe("New start. Leave empty to keep it. "+timeHint),
+		formkit.Text("end", "End").
+			Describe("New end. Leave empty to keep it. "+timeHint),
+		formkit.Bool("allDay", "All-day event").
+			Default(false).
+			Describe("When changing Start/End, treat them as all-day dates rather than timestamps."),
+		formkit.Text("timeZone", "Time zone").
+			Describe("IANA time zone for a changed start/end. Ignored for all-day events."),
+		formkit.Text("location", "Location").
+			Describe("New location. Leave empty to keep it. Accepts {{$.path}} tokens."),
+		formkit.TextArea("description", "Description").
+			Describe("New description. Leave empty to keep it. Accepts {{$.path}} tokens."),
+		formkit.List("attendees", "Attendees").
+			Describe("Replace the attendee list with these email addresses. Leave empty to keep the current attendees."),
+		sendUpdatesField(),
+	).
+	Build()
+
+var calendarDeleteEventForm = formkit.New("Delete event").
+	Add(
+		calendarIDField("calendarId", "Calendar", "googlecalendar.delete_event"),
+		formkit.Text("eventId", "Event id").
+			Required().
+			Describe("The id of the event to delete. Accepts {{$.path}} tokens."),
+		sendUpdatesField(),
+	).
+	Build()
+
+var calendarMoveEventForm = formkit.New("Move event").
+	Add(
+		calendarIDField("calendarId", "Source calendar", "googlecalendar.move_event"),
+		formkit.Text("eventId", "Event id").
+			Required().
+			Describe("The id of the event to move. Accepts {{$.path}} tokens."),
+		calendarIDField("destinationCalendarId", "Destination calendar", "googlecalendar.move_event").
+			Required(),
+		sendUpdatesField(),
+	).
+	Build()
+
+var calendarFindFreeForm = formkit.New("Find free/busy").
+	Add(
+		formkit.List("calendarIds", "Calendars").
+			Describe("Calendar ids / emails to check, one per entry. Empty checks your primary calendar. Each accepts {{$.path}} tokens."),
+		formkit.Text("timeMin", "Start of window").
+			Required().
+			Describe("Start of the range to check, RFC 3339, e.g. \"2026-09-01T00:00:00Z\". Accepts {{$.path}} tokens."),
+		formkit.Text("timeMax", "End of window").
+			Required().
+			Describe("End of the range to check, RFC 3339. Accepts {{$.path}} tokens."),
+		formkit.Text("timeZone", "Time zone").
+			Describe("IANA time zone for the query, e.g. \"America/Los_Angeles\"."),
+	).
+	Build()
+
+var calendarAddAttendeeForm = formkit.New("Add attendee").
+	Add(
+		calendarIDField("calendarId", "Calendar", "googlecalendar.add_attendee"),
+		formkit.Text("eventId", "Event id").
+			Required().
+			Describe("The id of the event to add the attendee to. Accepts {{$.path}} tokens."),
+		formkit.Text("attendeeEmail", "Attendee email").
+			Required().
+			Describe("The email address to add as an attendee. Accepts {{$.path}} tokens."),
+		formkit.Text("displayName", "Display name").
+			Describe("Optional display name for the attendee. Accepts {{$.path}} tokens."),
+		formkit.Bool("optional", "Optional attendee").
+			Default(false).
+			Describe("Mark the attendee as optional rather than required."),
+		sendUpdatesField(),
+	).
+	Build()
+
+var calendarRemoveAttendeeForm = formkit.New("Remove attendee").
+	Add(
+		calendarIDField("calendarId", "Calendar", "googlecalendar.remove_attendee"),
+		formkit.Text("eventId", "Event id").
+			Required().
+			Describe("The id of the event to remove the attendee from. Accepts {{$.path}} tokens."),
+		formkit.Text("attendeeEmail", "Attendee email").
+			Required().
+			Describe("The email address of the attendee to remove. Accepts {{$.path}} tokens."),
+		sendUpdatesField(),
+	).
+	Build()

@@ -21,6 +21,9 @@ func (r *Registry) Metas() []sdkv1.Meta {
 		{Method: "googlesheets.meta.spreadsheets.list", RequestHandler: r.metaSpreadsheetsList},
 		{Method: "googlesheets.meta.sheets.list", RequestHandler: r.metaSheetsList},
 		{Method: "googledocs.meta.documents.list", RequestHandler: r.metaDocumentsList},
+		{Method: "googledrive.meta.files.list", RequestHandler: r.metaFilesList},
+		{Method: "googledrive.meta.folders.list", RequestHandler: r.metaFoldersList},
+		{Method: "googlecalendar.meta.calendars.list", RequestHandler: r.metaCalendarsList},
 	}
 }
 
@@ -122,6 +125,140 @@ func (r *Registry) metaDocumentsList(req sdkv1.Request) any {
 		options,
 		formkit.FormData(body),
 		formkit.Success("%d document(s) for %s — pick one:", len(files), sess.Account.Name()).About(target),
+	)
+}
+
+// metaFilesList backs a "Load files" button on a Drive fileId field: it lists the
+// bound account's Drive files (any type, folders excluded) and REBUILDS the field
+// into a drop-down of them. Like the other file pickers, the value written is the
+// file NAME (resolved back to an id at run time by ResolveDriveFileID), and the
+// field stays typable so a pasted id / URL / {{$.path}} token still works when the
+// account lacks Drive scope.
+func (r *Registry) metaFilesList(req sdkv1.Request) any {
+	body := decodeMeta(req.Data)
+	target := text(body["targetField"])
+	if target == "" {
+		target = "fileId"
+	}
+
+	form, ok := driveFormByMethod[text(body["form"])]
+	if !ok {
+		return formkit.Failure("internal: no form to rebuild for this field").About(target).Patch(nil)
+	}
+
+	alias, connection := settingsFrom(body)
+	sess, err := r.oc.Bind(alias, connection)
+	if err != nil {
+		return formkit.Failure("%s", err.Error()).About(target).Patch(nil)
+	}
+	files, err := sess.DriveFiles()
+	if err != nil {
+		return formkit.Failure("%s%s  [as account %s]", err.Error(), driveScopeHint(err), sess.Account.Name()).About(target).Patch(nil)
+	}
+	if len(files) == 0 {
+		return formkit.Warning("No files found for account %s.", sess.Account.Name()).About(target).Patch(nil)
+	}
+
+	options := make([]formkit.Option, 0, len(files))
+	for _, f := range files {
+		options = append(options, formkit.Option{Value: f.Name, Label: f.Name})
+	}
+	return formkit.Choose(
+		form,
+		target,
+		options,
+		formkit.FormData(body),
+		formkit.Success("%d file(s) for %s — pick one:", len(files), sess.Account.Name()).About(target),
+	)
+}
+
+// metaFoldersList backs a "Load folders" button on a Drive folder field (a parent
+// or a move destination): it lists the bound account's folders and REBUILDS the
+// target field into a drop-down of them. The value written is the folder NAME
+// (resolved back to an id at run time by ResolveFolderID); the field stays typable
+// so a pasted id / URL / {{$.path}} token still works.
+func (r *Registry) metaFoldersList(req sdkv1.Request) any {
+	body := decodeMeta(req.Data)
+	target := text(body["targetField"])
+	if target == "" {
+		target = "folderId"
+	}
+
+	form, ok := driveFormByMethod[text(body["form"])]
+	if !ok {
+		return formkit.Failure("internal: no form to rebuild for this field").About(target).Patch(nil)
+	}
+
+	alias, connection := settingsFrom(body)
+	sess, err := r.oc.Bind(alias, connection)
+	if err != nil {
+		return formkit.Failure("%s", err.Error()).About(target).Patch(nil)
+	}
+	folders, err := sess.Folders()
+	if err != nil {
+		return formkit.Failure("%s%s  [as account %s]", err.Error(), driveScopeHint(err), sess.Account.Name()).About(target).Patch(nil)
+	}
+	if len(folders) == 0 {
+		return formkit.Warning("No folders found for account %s.", sess.Account.Name()).About(target).Patch(nil)
+	}
+
+	options := make([]formkit.Option, 0, len(folders))
+	for _, f := range folders {
+		options = append(options, formkit.Option{Value: f.Name, Label: f.Name})
+	}
+	return formkit.Choose(
+		form,
+		target,
+		options,
+		formkit.FormData(body),
+		formkit.Success("%d folder(s) for %s — pick one:", len(folders), sess.Account.Name()).About(target),
+	)
+}
+
+// metaCalendarsList backs a "Load calendars" button on a Calendar field: it lists
+// the bound account's calendars and REBUILDS the target field into a drop-down of
+// them. Unlike the file pickers, the value written is the calendar ID itself
+// (label = summary), since that is what the event actions speak in; the field
+// stays typable so "primary" or a pasted id still works.
+func (r *Registry) metaCalendarsList(req sdkv1.Request) any {
+	body := decodeMeta(req.Data)
+	target := text(body["targetField"])
+	if target == "" {
+		target = "calendarId"
+	}
+
+	form, ok := calendarFormByMethod[text(body["form"])]
+	if !ok {
+		return formkit.Failure("internal: no form to rebuild for this field").About(target).Patch(nil)
+	}
+
+	alias, connection := settingsFrom(body)
+	sess, err := r.oc.Bind(alias, connection)
+	if err != nil {
+		return formkit.Failure("%s", err.Error()).About(target).Patch(nil)
+	}
+	calendars, err := sess.Calendars()
+	if err != nil {
+		return formkit.Failure("%s  [as account %s]", err.Error(), sess.Account.Name()).About(target).Patch(nil)
+	}
+	if len(calendars) == 0 {
+		return formkit.Warning("No calendars found for account %s.", sess.Account.Name()).About(target).Patch(nil)
+	}
+
+	options := make([]formkit.Option, 0, len(calendars))
+	for _, c := range calendars {
+		label := c.Summary
+		if c.Primary {
+			label += "  (primary)"
+		}
+		options = append(options, formkit.Option{Value: c.ID, Label: label})
+	}
+	return formkit.Choose(
+		form,
+		target,
+		options,
+		formkit.FormData(body),
+		formkit.Success("%d calendar(s) for %s — pick one:", len(calendars), sess.Account.Name()).About(target),
 	)
 }
 
